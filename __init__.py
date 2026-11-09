@@ -1,0 +1,2 @@
+"""ShopSphere application package."""
+
