@@ -1,5 +1,6 @@
 import pytest
 
+from shopsphere.analytics import sales_summary
 from shopsphere.document_store import DocumentStore
 from shopsphere.sql_store import SQLStore
 
@@ -14,8 +15,13 @@ def test_login_cart_checkout_and_rollback(tmp_path):
     assert user is not None
     product = store.catalogue()[0]
     store.set_cart_item(user["user_id"], product["product_id"], 1)
+    assert sales_summary(store) == {"revenue": 0.0, "orders": 0}
     order_id = store.checkout(user["user_id"])
     assert store.orders(user["user_id"])[0]["order_id"] == order_id
+    assert sales_summary(store) == {
+        "revenue": float(store.orders()[0]["total_amount"]),
+        "orders": 1,
+    }
     with pytest.raises(ValueError, match="empty"):
         store.checkout(user["user_id"])
 
