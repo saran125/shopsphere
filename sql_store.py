@@ -10,6 +10,16 @@ from typing import Any, Iterator
 from .config import settings
 
 
+PRODUCT_COLOR_OPTIONS = {
+    "ceramic mug": ("Beige", "Blue"),
+    "chino shorts": ("Beige", "Blue"),
+}
+
+
+def product_color_options(product_name: str) -> tuple[str, ...]:
+    return PRODUCT_COLOR_OPTIONS.get(product_name.casefold(), ())
+
+
 SQLITE_SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS users (
@@ -26,14 +36,16 @@ CREATE TABLE IF NOT EXISTS products (
  product_id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER NOT NULL, category_id INTEGER NOT NULL,
  name TEXT NOT NULL, description TEXT NOT NULL, price NUMERIC NOT NULL CHECK(price >= 0),
  is_active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ image_filename TEXT, source_name TEXT, source_id TEXT,
  FOREIGN KEY(seller_id) REFERENCES sellers(seller_id), FOREIGN KEY(category_id) REFERENCES categories(category_id));
 CREATE TABLE IF NOT EXISTS inventory (
  product_id INTEGER PRIMARY KEY, quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity >= 0),
  reorder_level INTEGER NOT NULL DEFAULT 5 CHECK(reorder_level >= 0), updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
  FOREIGN KEY(product_id) REFERENCES products(product_id));
 CREATE TABLE IF NOT EXISTS cart_items (
- user_id INTEGER NOT NULL, product_id INTEGER NOT NULL, quantity INTEGER NOT NULL CHECK(quantity > 0),
- updated_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(user_id, product_id),
+ user_id INTEGER NOT NULL, product_id INTEGER NOT NULL, color TEXT NOT NULL DEFAULT '',
+ quantity INTEGER NOT NULL CHECK(quantity > 0),
+ updated_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(user_id, product_id, color),
  FOREIGN KEY(user_id) REFERENCES users(user_id), FOREIGN KEY(product_id) REFERENCES products(product_id));
 CREATE TABLE IF NOT EXISTS orders (
  order_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'paid',
@@ -42,6 +54,7 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS order_items (
  order_item_id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL, product_id INTEGER NOT NULL,
  seller_id INTEGER NOT NULL, quantity INTEGER NOT NULL CHECK(quantity > 0), unit_price NUMERIC NOT NULL,
+ color TEXT NOT NULL DEFAULT '',
  FOREIGN KEY(order_id) REFERENCES orders(order_id), FOREIGN KEY(product_id) REFERENCES products(product_id),
  FOREIGN KEY(seller_id) REFERENCES sellers(seller_id));
 CREATE TABLE IF NOT EXISTS payments (
@@ -70,6 +83,55 @@ class SQLStore:
     def _initialise(self) -> None:
         with self.connection() as conn:
             conn.executescript(SQLITE_SCHEMA)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(products)")}
+            if "image_filename" not in columns:
+                conn.execute("ALTER TABLE products ADD COLUMN image_filename TEXT")
+            if "source_name" not in columns:
+                conn.execute("ALTER TABLE products ADD COLUMN source_name TEXT")
+            if "source_id" not in columns:
+                conn.execute("ALTER TABLE products ADD COLUMN source_id TEXT")
+            conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_products_source
+                   ON products(source_name, source_id)
+                   WHERE source_name IS NOT NULL AND source_id IS NOT NULL"""
+            )
+            cart_columns = {row["name"] for row in conn.execute("PRAGMA table_info(cart_items)")}
+            if "color" not in cart_columns:
+                conn.execute("BEGIN")
+                try:
+                    conn.execute(
+                        """CREATE TABLE cart_items_with_color (
+                            user_id INTEGER NOT NULL,
+                            product_id INTEGER NOT NULL,
+                            color TEXT NOT NULL DEFAULT '',
+                            quantity INTEGER NOT NULL CHECK(quantity > 0),
+                            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY(user_id, product_id, color),
+                            FOREIGN KEY(user_id) REFERENCES users(user_id),
+                            FOREIGN KEY(product_id) REFERENCES products(product_id)
+                        )"""
+                    )
+                    conn.execute(
+                        """INSERT INTO cart_items_with_color
+                           (user_id, product_id, color, quantity, updated_at)
+                           SELECT user_id, product_id, '', quantity, updated_at
+                           FROM cart_items"""
+                    )
+                    conn.execute("DROP TABLE cart_items")
+                    conn.execute(
+                        "ALTER TABLE cart_items_with_color RENAME TO cart_items"
+                    )
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+            order_item_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(order_items)")
+            }
+            if "color" not in order_item_columns:
+                conn.execute(
+                    "ALTER TABLE order_items ADD COLUMN color TEXT NOT NULL DEFAULT ''"
+                )
             if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
                 self.seed_demo(conn)
 
@@ -171,22 +233,84 @@ class SQLStore:
 
     def cart(self, user_id: int) -> list[dict[str, Any]]:
         with self.connection() as conn:
-            return [dict(row) for row in conn.execute("""SELECT c.product_id,c.quantity,p.name,p.price,
-                (c.quantity*p.price) subtotal FROM cart_items c JOIN products p USING(product_id)
+            return [dict(row) for row in conn.execute("""SELECT c.product_id,c.color,c.quantity,p.name,p.price,
+                i.quantity stock_quantity,(c.quantity*p.price) subtotal
+                FROM cart_items c JOIN products p USING(product_id)
+                JOIN inventory i USING(product_id)
                 WHERE c.user_id=? ORDER BY c.updated_at DESC""", (user_id,))]
 
-    def set_cart_item(self, user_id: int, product_id: int, quantity: int) -> None:
+    def set_cart_item(
+        self,
+        user_id: int,
+        product_id: int,
+        quantity: int,
+        color: str = "",
+        previous_color: str | None = None,
+    ) -> None:
         if quantity < 1:
             with self.connection() as conn:
-                conn.execute("DELETE FROM cart_items WHERE user_id=? AND product_id=?", (user_id, product_id))
+                item_color = color if previous_color is None else previous_color
+                conn.execute(
+                    "DELETE FROM cart_items WHERE user_id=? AND product_id=? AND color=?",
+                    (user_id, product_id, item_color),
+                )
             return
         with self.connection() as conn:
-            stock = conn.execute("SELECT quantity FROM inventory WHERE product_id=?", (product_id,)).fetchone()
-            if not stock or quantity > stock[0]:
+            product = conn.execute(
+                """SELECT p.name, i.quantity stock
+                   FROM products p JOIN inventory i USING(product_id)
+                   WHERE p.product_id=?""",
+                (product_id,),
+            ).fetchone()
+            if not product or quantity > product["stock"]:
                 raise ValueError("Requested quantity exceeds available stock.")
-            conn.execute("""INSERT INTO cart_items(user_id,product_id,quantity) VALUES(?,?,?)
-                            ON CONFLICT(user_id,product_id) DO UPDATE SET quantity=excluded.quantity,
-                            updated_at=CURRENT_TIMESTAMP""", (user_id, product_id, quantity))
+            colors = product_color_options(product["name"])
+            if colors and color not in colors:
+                raise ValueError("Choose a color for this product.")
+            if not colors and color:
+                raise ValueError("This product does not have color options.")
+
+            if previous_color is not None and previous_color != color:
+                source = conn.execute(
+                    """SELECT quantity FROM cart_items
+                       WHERE user_id=? AND product_id=? AND color=?""",
+                    (user_id, product_id, previous_color),
+                ).fetchone()
+                if source:
+                    target = conn.execute(
+                        """SELECT quantity FROM cart_items
+                           WHERE user_id=? AND product_id=? AND color=?""",
+                        (user_id, product_id, color),
+                    ).fetchone()
+                    if target:
+                        merged_quantity = target["quantity"] + quantity
+                        if merged_quantity > product["stock"]:
+                            raise ValueError("Requested quantity exceeds available stock.")
+                        conn.execute(
+                            """UPDATE cart_items SET quantity=?, updated_at=CURRENT_TIMESTAMP
+                               WHERE user_id=? AND product_id=? AND color=?""",
+                            (merged_quantity, user_id, product_id, color),
+                        )
+                        conn.execute(
+                            """DELETE FROM cart_items
+                               WHERE user_id=? AND product_id=? AND color=?""",
+                            (user_id, product_id, previous_color),
+                        )
+                        return
+                    conn.execute(
+                        """UPDATE cart_items
+                           SET color=?, quantity=?, updated_at=CURRENT_TIMESTAMP
+                           WHERE user_id=? AND product_id=? AND color=?""",
+                        (color, quantity, user_id, product_id, previous_color),
+                    )
+                    return
+
+            conn.execute(
+                """INSERT INTO cart_items(user_id,product_id,color,quantity) VALUES(?,?,?,?)
+                   ON CONFLICT(user_id,product_id,color) DO UPDATE SET
+                   quantity=excluded.quantity, updated_at=CURRENT_TIMESTAMP""",
+                (user_id, product_id, color, quantity),
+            )
 
     def create_product(self, user_id: int, category_id: int, name: str,
                        description: str, price: float, quantity: int) -> int:
@@ -243,17 +367,63 @@ class SQLStore:
                    JOIN inventory i USING(product_id)
                    WHERE p.seller_id=? ORDER BY p.created_at DESC""", (seller_id,))]
 
+    def product_image_path(self, image_filename: str | None) -> Path | None:
+        if not image_filename:
+            return None
+        filename = Path(image_filename)
+        if filename.name != image_filename or filename.suffix.lower() not in {
+            ".jpg", ".jpeg", ".png", ".webp"
+        }:
+            raise ValueError("Invalid product image filename.")
+        image_path = self.path.parent / "product_images" / filename
+        return image_path if image_path.is_file() else None
+
+    def save_product_image(
+        self, user_id: int, product_id: int, image_bytes: bytes, extension: str
+    ) -> str:
+        extension = extension.lower().lstrip(".")
+        if extension not in {"jpg", "jpeg", "png", "webp"} or not image_bytes:
+            raise ValueError("A valid product image is required.")
+        seller_id = self.seller_id_for_user(user_id)
+        if seller_id is None:
+            raise PermissionError("Seller access required.")
+        with self.connection() as conn:
+            owned = conn.execute(
+                "SELECT 1 FROM products WHERE product_id=? AND seller_id=?",
+                (product_id, seller_id),
+            ).fetchone()
+        if not owned:
+            raise PermissionError("You can only add photos to your own products.")
+
+        filename = f"{product_id}.{extension}"
+        image_directory = self.path.parent / "product_images"
+        image_directory.mkdir(parents=True, exist_ok=True)
+        (image_directory / filename).write_bytes(image_bytes)
+        with self.connection() as conn:
+            changed = conn.execute(
+                "UPDATE products SET image_filename=? WHERE product_id=? AND seller_id=?",
+                (filename, product_id, seller_id),
+            ).rowcount
+        if changed != 1:
+            raise PermissionError("You can only add photos to your own products.")
+        return filename
+
     def checkout(self, user_id: int, method: str = "simulated_card") -> int:
         with self.connection() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                rows = conn.execute("""SELECT c.product_id,c.quantity,p.price,p.seller_id,i.quantity stock
+                rows = conn.execute("""SELECT c.product_id,c.color,c.quantity,p.name,p.price,
+                    p.seller_id,i.quantity stock
                     FROM cart_items c JOIN products p USING(product_id) JOIN inventory i USING(product_id)
                     WHERE c.user_id=? AND p.is_active=1""", (user_id,)).fetchall()
                 if not rows:
                     raise ValueError("Your cart is empty.")
                 if any(row["quantity"] > row["stock"] for row in rows):
                     raise ValueError("Stock changed; reduce your cart quantity and try again.")
+                for row in rows:
+                    colors = product_color_options(row["name"])
+                    if colors and row["color"] not in colors:
+                        raise ValueError(f"Choose a color for {row['name']} before checkout.")
                 total = sum(Decimal(str(row["price"])) * row["quantity"] for row in rows)
                 cur = conn.execute("INSERT INTO orders(user_id,status,total_amount) VALUES(?,?,?)",
                                    (user_id, "paid", str(total)))
@@ -264,9 +434,19 @@ class SQLStore:
                                            (row["quantity"], row["product_id"], row["quantity"]))
                     if updated.rowcount != 1:
                         raise ValueError("Stock changed during checkout; no order was created.")
-                    conn.execute("""INSERT INTO order_items(order_id,product_id,seller_id,quantity,unit_price)
-                                    VALUES(?,?,?,?,?)""", (order_id, row["product_id"], row["seller_id"],
-                                                            row["quantity"], row["price"]))
+                    conn.execute(
+                        """INSERT INTO order_items
+                           (order_id,product_id,seller_id,quantity,unit_price,color)
+                           VALUES(?,?,?,?,?,?)""",
+                        (
+                            order_id,
+                            row["product_id"],
+                            row["seller_id"],
+                            row["quantity"],
+                            row["price"],
+                            row["color"],
+                        ),
+                    )
                 conn.execute("INSERT INTO payments(order_id,amount,method) VALUES(?,?,?)",
                              (order_id, str(total), method))
                 conn.execute("DELETE FROM cart_items WHERE user_id=?", (user_id,))
@@ -293,7 +473,7 @@ class SQLStore:
         with self.connection() as conn:
             return [dict(row) for row in conn.execute(
                 """SELECT o.order_id, o.created_at, o.status, u.full_name customer,
-                          p.name product, oi.quantity, oi.unit_price,
+                          p.name product, oi.color, oi.quantity, oi.unit_price,
                           oi.quantity * oi.unit_price revenue
                    FROM order_items oi JOIN orders o USING(order_id)
                    JOIN users u USING(user_id) JOIN products p USING(product_id)
