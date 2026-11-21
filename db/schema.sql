@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS Products (
  product_id INT AUTO_INCREMENT PRIMARY KEY, seller_id INT NOT NULL, category_id INT NOT NULL,
  name VARCHAR(200) NOT NULL, description TEXT NOT NULL, price DECIMAL(10,2) NOT NULL CHECK (price >= 0),
  is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ image_filename VARCHAR(255), source_name VARCHAR(80), source_id VARCHAR(255),
+ UNIQUE KEY uq_products_source (source_name, source_id),
  FOREIGN KEY (seller_id) REFERENCES Sellers(seller_id), FOREIGN KEY (category_id) REFERENCES Categories(category_id)
 );
 CREATE TABLE IF NOT EXISTS Inventory (
@@ -27,8 +29,9 @@ CREATE TABLE IF NOT EXISTS Inventory (
  FOREIGN KEY (product_id) REFERENCES Products(product_id)
 );
 CREATE TABLE IF NOT EXISTS CartItems (
- user_id INT NOT NULL, product_id INT NOT NULL, quantity INT NOT NULL CHECK (quantity > 0),
- PRIMARY KEY (user_id, product_id), FOREIGN KEY (user_id) REFERENCES Users(user_id),
+ user_id INT NOT NULL, product_id INT NOT NULL, color VARCHAR(16) NOT NULL DEFAULT '',
+ quantity INT NOT NULL CHECK (quantity > 0),
+ PRIMARY KEY (user_id, product_id, color), FOREIGN KEY (user_id) REFERENCES Users(user_id),
  FOREIGN KEY (product_id) REFERENCES Products(product_id)
 );
 CREATE TABLE IF NOT EXISTS Orders (
@@ -39,6 +42,7 @@ CREATE TABLE IF NOT EXISTS Orders (
 CREATE TABLE IF NOT EXISTS OrderItems (
  order_item_id INT AUTO_INCREMENT PRIMARY KEY, order_id INT NOT NULL, product_id INT NOT NULL,
  seller_id INT NOT NULL, quantity INT NOT NULL CHECK (quantity > 0), unit_price DECIMAL(10,2) NOT NULL,
+ color VARCHAR(16) NOT NULL DEFAULT '',
  FOREIGN KEY (order_id) REFERENCES Orders(order_id), FOREIGN KEY (product_id) REFERENCES Products(product_id),
  FOREIGN KEY (seller_id) REFERENCES Sellers(seller_id)
 );

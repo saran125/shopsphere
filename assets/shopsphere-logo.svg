@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="128" viewBox="0 0 480 128" role="img" aria-labelledby="title">
+  <title id="title">ShopSphere</title>
+  <defs>
+    <linearGradient id="bag" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#34D399"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="34" fill="#121A23" stroke="#263B4B" stroke-width="2"/>
+  <path d="M34 47h60l-5 55H39z" fill="url(#bag)"/>
+  <path d="M48 50c0-15 7-24 16-24s16 9 16 24" fill="none" stroke="#E6EDF3" stroke-linecap="round" stroke-width="6"/>
+  <circle cx="51" cy="68" r="4" fill="#0B1720"/>
+  <circle cx="77" cy="68" r="4" fill="#0B1720"/>
+  <path d="M53 82c5 7 17 7 22 0" fill="none" stroke="#0B1720" stroke-linecap="round" stroke-width="4"/>
+  <text x="146" y="78" fill="#E6EDF3" font-family="Inter, Segoe UI, sans-serif" font-size="35" font-weight="700" letter-spacing="-1">Shop<tspan fill="#34D399">Sphere</tspan></text>
+  <text x="148" y="101" fill="#90A4B8" font-family="Inter, Segoe UI, sans-serif" font-size="12" font-weight="500" letter-spacing="3">THOUGHTFUL FINDS</text>
+</svg>
